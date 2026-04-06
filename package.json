@@ -1,0 +1,9 @@
+{
+  "name": "sayajin-pose-detector",
+  "version": "0.0.1",
+  "description": "An AI on the Edge project for pose detection.",
+  "license": "ISC",
+  "author": "Kelvin Bianchi",
+  "type": "commonjs",
+  "main": "index.js"
+}
