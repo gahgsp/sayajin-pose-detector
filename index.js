@@ -21,38 +21,47 @@ let isAuraActive = false
 const maskedCanvas = document.createElement('canvas')
 let auraRenderer = null
 
-async function initializeModel() {
-  console.log('[START] Loading Hand Detection model...')
-  const detector = await handPoseDetection.createDetector(
-    handPoseDetection.SupportedModels.MediaPipeHands, {
-    maxHands: 2,
-    modelType: 'lite',
-    runtime: 'mediapipe',
-    solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands'
-  })
-  console.log('[END] Loading Hand Detection model...')
-  return detector
-}
+const worker = new Worker('worker.js')
+let isWorkerReady = false
+let isInferencing = false
 
-async function runInference(handDetector) {
-  const HAND_INFERENCE_INTERVAL_IN_MS = 60
+let lastInferenceTime = 0
+const HAND_INFERENCE_INTERVAL_IN_MS = 60
 
-  // We will only run the inference if the video is actually playing.
-  if (video.readyState >= 2) {
-    currentHands = await handDetector.estimateHands(video)
+worker.addEventListener('message', ({ data: { type, hands } }) => {
+  if (type === 'READY') {
+    isWorkerReady = true
+  } else if (type === 'RESULT') {
+    currentHands = hands
 
     // We only want to start the detection of the gesture after identifying two hands...
     isAuraActive = currentHands.length >= 2 && currentHands.every((currentHand) => {
       // As for this pose we require both hands to be doing the same gesture, we iterateve and estimate them individually.
       return GE.estimate(transform3DKeypoints(currentHand.keypoints3D), 9).gestures.length > 0
     })
-  }
 
-  // For performance reasons, we can allow ourselves to run the inference only every a specific time interval.
-  setTimeout(() => runInference(handDetector), HAND_INFERENCE_INTERVAL_IN_MS)
+    isInferencing = false
+  }
+})
+
+async function runInference() {
+  isInferencing = true
+
+  /**
+   * We extract the image as a hardware-accelerated bitmap object, so we can bypass a drawing to the canvas.
+   */
+  const bitmap = await createImageBitmap(video, {
+    resizeQuality: 'pixelated' // Reducing the quality for better performance.
+  })
+
+  /**
+   * When using Web Workers, we can post a message with the second parameter to "transfer the ownership" to the worker.
+   * This means that instead of creating and sending a copy to the worker, we are giving the original reference to it.
+   */
+  worker.postMessage({ type: 'INFERENCE', frame: bitmap }, [bitmap])
 }
 
-function draw() {
+function draw(timestamp) {
   if (canvas.width !== video.videoWidth) {
     canvas.width = video.videoWidth
     canvas.height = video.videoHeight
@@ -62,15 +71,16 @@ function draw() {
     auraRenderer = createWebGLRenderer(maskedCanvas)
   }
 
+  if (video.readyState >= 2 && isWorkerReady && !isInferencing && timestamp - lastInferenceTime >= HAND_INFERENCE_INTERVAL_IN_MS) {
+    lastInferenceTime = timestamp
+    runInference()
+  }
+
   ctx.clearRect(0, 0, canvas.width, canvas.height)
   ctx.drawImage(video, 0, 0)
 
   if (isAuraActive && auraRenderer) {
-    if (maskedCanvas.width !== video.videoWidth) {
-      maskedCanvas.width = video.videoWidth
-      maskedCanvas.height = video.videoHeight
-    }
-
+    // If we identified the gesture, we can render the aura effect.
     auraRenderer.render(auraVideo)
 
     ctx.save()
@@ -93,14 +103,12 @@ function draw() {
 
 async function initialize() {
   try {
-    const handDetector = await initializeModel()
-
     navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
       video.srcObject = stream
       video.onloadedmetadata = () => {
         video.play()
-        runInference(handDetector)
-        draw()
+        // We want to start immediately inferecing so we pass 0.
+        draw(0)
       }
     }).catch(console.error)
 
